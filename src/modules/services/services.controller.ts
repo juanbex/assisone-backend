@@ -1,18 +1,10 @@
 import { FastifyRequest, FastifyReply } from 'fastify'
-import { listServices, getServiceById, countByStatus } from './services.repository'
+import { listServices, getServiceById, countByStatus, createService, updateServiceStatus, listServiceTypes } from './services.repository'
 
 export async function getServices(request: FastifyRequest, reply: FastifyReply) {
   const user = request.user as any
   const { status, search, page, limit } = request.query as any
-
-  const result = await listServices({
-    tenantId: user.tenantId,
-    status,
-    search,
-    page: page ? parseInt(page) : 1,
-    limit: limit ? parseInt(limit) : 50,
-  })
-
+  const result = await listServices({ tenantId: user.tenantId, status, search, page: page ? parseInt(page) : 1, limit: limit ? parseInt(limit) : 50 })
   return reply.send(result)
 }
 
@@ -29,4 +21,33 @@ export async function getStats(request: FastifyRequest, reply: FastifyReply) {
   const counts = await countByStatus(user.tenantId)
   const total = Object.values(counts).reduce((a: number, b) => a + (b as number), 0)
   return reply.send({ data: { total, ...counts } })
+}
+
+export async function postService(request: FastifyRequest, reply: FastifyReply) {
+  const user = request.user as any
+  const body = request.body as any
+  try {
+    const service = await createService({ tenantId: user.tenantId, frontAgentId: user.id, ...body })
+    return reply.status(201).send({ data: service })
+  } catch (err: any) {
+    return reply.status(400).send({ error: err.message })
+  }
+}
+
+export async function patchServiceStatus(request: FastifyRequest, reply: FastifyReply) {
+  const user = request.user as any
+  const { id } = request.params as any
+  const { status, notes } = request.body as any
+  try {
+    const service = await updateServiceStatus(id, user.tenantId, status, notes)
+    return reply.send({ data: service })
+  } catch (err: any) {
+    return reply.status(400).send({ error: err.message })
+  }
+}
+
+export async function getServiceTypes(request: FastifyRequest, reply: FastifyReply) {
+  const user = request.user as any
+  const types = await listServiceTypes(user.tenantId)
+  return reply.send({ data: types })
 }
