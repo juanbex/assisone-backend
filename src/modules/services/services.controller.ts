@@ -1,5 +1,6 @@
 import { FastifyRequest, FastifyReply } from 'fastify'
 import { listServices, getServiceById, countByStatus, createService, updateServiceStatus, listServiceTypes } from './services.repository'
+import { startCoordination } from '../assignments/assignments.service'
 
 export async function getServices(request: FastifyRequest, reply: FastifyReply) {
   const user = request.user as any
@@ -38,7 +39,24 @@ export async function patchServiceStatus(request: FastifyRequest, reply: Fastify
   const user = request.user as any
   const { id } = request.params as any
   const { status, notes } = request.body as any
+
   try {
+    // Si el nuevo status es in_coordination → disparar flujo de coordinación real
+    if (status === 'in_coordination') {
+      const result = await startCoordination(id)
+
+      // startCoordination ya actualiza el status internamente
+      const service = await getServiceById(id, user.tenantId)
+      return reply.send({
+        data: service,
+        coordination: result,
+        message: result.eligible > 0
+          ? `Push enviado a ${result.eligible} proveedor(es). Timer de 10 minutos activo.`
+          : 'Sin proveedores disponibles → servicio marcado como no coordinado.',
+      })
+    }
+
+    // Para otros cambios de status → flujo normal
     const service = await updateServiceStatus(id, user.tenantId, status, notes)
     return reply.send({ data: service })
   } catch (err: any) {
