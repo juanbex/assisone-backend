@@ -14,9 +14,7 @@ export async function buildApp() {
 
   await app.register(import('./modules/auth/auth.routes'),         { prefix: '/api/auth' })
   await app.register(import('./modules/services/services.routes'), { prefix: '/api/services' })
-  await app.register(import('./modules/providers/providers.routes'),{ prefix: '/api/providers' })
-  await app.register(import('./modules/admin/admin.routes'),        { prefix: '/api/admin' })
-  // await app.register(import('./modules/webhooks/whatsapp.routes'), { prefix: '/webhooks' })
+  await app.register(import('./modules/admin/admin.routes'),       { prefix: '/api/admin' })
 
   return app
 }
