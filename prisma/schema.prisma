@@ -1,0 +1,196 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  config    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  users        User[]
+  clients      Client[]
+  services     Service[]
+  serviceTypes ServiceType[]
+  roles        Role[]
+}
+
+model User {
+  id        String   @id @default(uuid())
+  tenantId  String
+  name      String
+  email     String   @unique
+  phone     String?
+  password  String
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  tenant       Tenant     @relation(fields: [tenantId], references: [id])
+  userRoles    UserRole[]
+  frontServices Service[] @relation("FrontAgent")
+  backServices  Service[] @relation("BackAgent")
+}
+
+model Role {
+  id          String  @id @default(uuid())
+  tenantId    String
+  name        String
+  description String?
+  isSystem    Boolean @default(false)
+  tenant          Tenant           @relation(fields: [tenantId], references: [id])
+  userRoles       UserRole[]
+  rolePermissions RolePermission[]
+}
+
+model UserRole {
+  userId     String
+  roleId     String
+  assignedAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id])
+  role Role @relation(fields: [roleId], references: [id])
+  @@id([userId, roleId])
+}
+
+model Permission {
+  id          String @id @default(uuid())
+  resource    String
+  action      String
+  description String?
+  rolePermissions RolePermission[]
+  @@unique([resource, action])
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+  @@id([roleId, permissionId])
+}
+
+model ServiceCategory {
+  id           String        @id @default(uuid())
+  name         String
+  icon         String?
+  serviceTypes ServiceType[]
+}
+
+model ServiceType {
+  id         String  @id @default(uuid())
+  categoryId String
+  tenantId   String?
+  name       String
+  slaMinutes Int     @default(60)
+  category ServiceCategory @relation(fields: [categoryId], references: [id])
+  tenant   Tenant?         @relation(fields: [tenantId], references: [id])
+  services Service[]
+}
+
+model Client {
+  id           String   @id @default(uuid())
+  tenantId     String
+  name         String
+  policyNumber String?
+  phone        String
+  email        String?
+  createdAt    DateTime @default(now())
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  services Service[]
+}
+
+model Service {
+  id            String    @id @default(uuid())
+  tenantId      String
+  clientId      String
+  serviceTypeId String
+  frontAgentId  String?
+  backAgentId   String?
+  status        String    @default("received")
+  location      Json
+  notes         String?
+  createdAt     DateTime  @default(now())
+  assignedAt    DateTime?
+  completedAt   DateTime?
+  tenant      Tenant      @relation(fields: [tenantId], references: [id])
+  client      Client      @relation(fields: [clientId], references: [id])
+  serviceType ServiceType @relation(fields: [serviceTypeId], references: [id])
+  frontAgent  User?       @relation("FrontAgent", fields: [frontAgentId], references: [id])
+  backAgent   User?       @relation("BackAgent",  fields: [backAgentId],  references: [id])
+  assignments   ServiceAssignment[]
+  events        ServiceEvent[]
+  evidences     ServiceEvidence[]
+  appointments  Appointment[]
+  notifications Notification[]
+}
+
+model Provider {
+  id            String   @id @default(uuid())
+  name          String
+  whatsapp      String   @unique
+  type          String
+  coverageZones Json     @default("[]")
+  createdAt     DateTime @default(now())
+  assignments   ServiceAssignment[]
+  evidences     ServiceEvidence[]
+  notifications Notification[]
+}
+
+model ServiceAssignment {
+  id          String    @id @default(uuid())
+  serviceId   String
+  providerId  String
+  status      String    @default("pending")
+  etaMinutes  Int?
+  sentAt      DateTime  @default(now())
+  respondedAt DateTime?
+  service  Service  @relation(fields: [serviceId], references: [id])
+  provider Provider @relation(fields: [providerId], references: [id])
+}
+
+model ServiceEvent {
+  id        String   @id @default(uuid())
+  serviceId String
+  eventType String
+  payload   Json     @default("{}")
+  createdAt DateTime @default(now())
+  service Service @relation(fields: [serviceId], references: [id])
+}
+
+model ServiceEvidence {
+  id         String   @id @default(uuid())
+  serviceId  String
+  providerId String
+  s3Url      String
+  type       String   @default("photo")
+  createdAt  DateTime @default(now())
+  service  Service  @relation(fields: [serviceId], references: [id])
+  provider Provider @relation(fields: [providerId], references: [id])
+}
+
+model Appointment {
+  id          String   @id @default(uuid())
+  serviceId   String
+  specialty   String
+  doctor      String?
+  scheduledAt DateTime
+  status      String   @default("scheduled")
+  createdAt   DateTime @default(now())
+  service Service @relation(fields: [serviceId], references: [id])
+}
+
+model Notification {
+  id         String   @id @default(uuid())
+  serviceId  String?
+  providerId String?
+  channel    String   @default("whatsapp")
+  message    String
+  status     String   @default("sent")
+  sentAt     DateTime @default(now())
+  service  Service?  @relation(fields: [serviceId],  references: [id])
+  provider Provider? @relation(fields: [providerId], references: [id])
+}
