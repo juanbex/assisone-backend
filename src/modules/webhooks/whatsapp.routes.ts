@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { db } from '../../shared/lib/db'
 import { sendText, sendAssignmentConfirmation } from '../notifications/whatsapp.service'
 import { evidenceUploadQueue } from '../../shared/lib/bullmq'
-import { acceptAssignment, rejectAssignment } from '../assignments/assignments.service'
+import { acceptAssignment, rejectAssignment, saveProviderEta } from '../assignments/assignments.service'
 
 const STATUS_MAP: Record<string, string> = {
   'EN CAMINO':  'assigned',
@@ -16,7 +16,7 @@ const REPLIES: Record<string, string> = {
   completed:   '✅ Servicio finalizado. ¡Gracias!',
 }
 
-function normalizePhone(raw: string): string[] {
+function buildPhoneVariants(raw: string): string[] {
   const digits = raw.replace(/\D/g, '')
   const variants = new Set<string>()
   variants.add(digits)
@@ -45,7 +45,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
 
     if (!rawFrom) return reply.send('ok')
 
-    const phoneVariants = normalizePhone(rawFrom)
+    const phoneVariants = buildPhoneVariants(rawFrom)
 
     const findPendingAssignment = () =>
       db.serviceAssignment.findFirst({
@@ -58,13 +58,39 @@ export default async function whatsappRoutes(app: FastifyInstance) {
         where: { provider: { whatsapp: { in: phoneVariants } }, status: 'accepted' },
       })
 
+    // ── ETA: proveedor responde con número de minutos ─────────────────
+    const etaMatch = msgBody.match(/^(\d{1,3})\s*(min|minutos?)?$/i)
+    if (etaMatch) {
+      const minutes = parseInt(etaMatch[1])
+      if (minutes > 0 && minutes <= 300) {
+        const assignment = await findAcceptedAssignment()
+        if (assignment) {
+          await saveProviderEta(rawFrom, minutes)
+          await sendText(rawFrom, `⏱ Perfecto, registramos ${minutes} minutos de tiempo estimado. ¡El cliente fue informado!`)
+          return reply.send('ok')
+        }
+      }
+    }
+
     // ── Aceptar ──────────────────────────────────────────────────────
     if (ACCEPT_KEYWORDS.includes(msgLower)) {
       const assignment = await findPendingAssignment()
       if (assignment) {
-        const result = await acceptAssignment(assignment.id, rawFrom)
+        const result = await acceptAssignment(assignment.id, rawFrom) as any
         if (result) {
-          await sendAssignmentConfirmation(rawFrom, assignment.serviceId)
+          const service = result.service
+          const location = (service?.location as any)?.address ?? 'Ver detalles en el sistema'
+          const mapUrl = location !== 'Ver detalles en el sistema'
+            ? `\n\n🗺 Ver ubicación: https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(location)}`
+            : ''
+
+          await sendText(rawFrom,
+            `✅ *Servicio aceptado* #${result.serviceId.slice(0, 8).toUpperCase()}\n\n` +
+            `👤 Cliente: ${service?.client?.name ?? '—'}\n` +
+            `🔧 Tipo: ${service?.serviceType?.name ?? '—'}\n` +
+            `📍 Ubicación: ${location}${mapUrl}\n\n` +
+            `⏱ *¿En cuántos minutos llegas?*\nResponde solo con el número (ej: *15*)`
+          )
         } else {
           await sendText(rawFrom, 'Este servicio ya fue tomado por otro proveedor.')
         }
