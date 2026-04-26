@@ -31,6 +31,9 @@ function buildPhoneVariants(raw: string): string[] {
   return Array.from(variants)
 }
 
+// Respuesta vacía que Twilio entiende — NO reenvía nada al usuario
+const TWIML_EMPTY = '<Response></Response>'
+
 const ACCEPT_KEYWORDS = ['aceptar', 'acepto', 'si', 'sí', 'ok', 'yes']
 const REJECT_KEYWORDS = ['rechazar', 'no puedo', 'no', 'rechazado']
 
@@ -38,12 +41,15 @@ export default async function whatsappRoutes(app: FastifyInstance) {
   app.get('/whatsapp', async (_req, reply) => reply.send('ok'))
 
   app.post('/whatsapp', async (req: any, reply) => {
+    // Siempre responder TwiML vacío para que Twilio no reenvíe nada
+    reply.header('Content-Type', 'text/xml')
+
     const body     = req.body as any
     const rawFrom  = (body?.From ?? '').replace('whatsapp:', '').trim()
     const msgBody  = (body?.Body ?? '').trim()
     const msgLower = msgBody.toLowerCase()
 
-    if (!rawFrom) return reply.send('ok')
+    if (!rawFrom) return reply.send(TWIML_EMPTY)
 
     const phoneVariants = buildPhoneVariants(rawFrom)
 
@@ -73,7 +79,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
         if (assignment) {
           await saveProviderEta(rawFrom, minutes)
           await sendText(rawFrom, `⏱ Perfecto, registramos ${minutes} minutos de tiempo estimado. ¡El cliente fue informado!`)
-          return reply.send('ok')
+          return reply.send(TWIML_EMPTY)
         }
       }
     }
@@ -81,9 +87,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
     // ── Aceptar ──────────────────────────────────────────────────────
     if (ACCEPT_KEYWORDS.includes(msgLower)) {
       const pending = await findPendingAssignment()
-
       if (pending) {
-        // Tiene asignación pendiente — intentar aceptar
         const result = await acceptAssignment(pending.id, rawFrom) as any
         if (result) {
           const service = result.service
@@ -91,7 +95,6 @@ export default async function whatsappRoutes(app: FastifyInstance) {
           const mapUrl = location !== 'Ver detalles en el sistema'
             ? `\n\n🗺 Ver ubicación: https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(location)}`
             : ''
-
           await sendText(rawFrom,
             `✅ *Servicio aceptado* #${result.serviceId.slice(0, 8).toUpperCase()}\n\n` +
             `👤 Cliente: ${service?.client?.name ?? '—'}\n` +
@@ -100,19 +103,17 @@ export default async function whatsappRoutes(app: FastifyInstance) {
             `⏱ *¿En cuántos minutos llegas?*\nResponde solo con el número (ej: *15*)`
           )
         } else {
-          // Race condition — otro proveedor lo tomó al mismo tiempo
-          await sendText(rawFrom, '⚠️ Este servicio ya fue tomado por otro proveedor en este momento. Estaremos en contacto para el próximo caso.')
+          await sendText(rawFrom, '⚠️ Este servicio ya fue tomado por otro proveedor en este momento.')
         }
       } else {
-        // No hay pendiente — verificar si fue cancelado (ya tomado por otro)
         const cancelled = await findCancelledAssignment()
         if (cancelled) {
-          await sendText(rawFrom, '⚠️ Este servicio ya fue coordinado con otro proveedor. Gracias por tu disposición, te contactaremos para el próximo caso.')
+          await sendText(rawFrom, '⚠️ Este servicio ya fue coordinado con otro proveedor. Gracias por tu disposición.')
         } else {
-          await sendText(rawFrom, 'No tienes solicitudes de servicio pendientes en este momento.')
+          await sendText(rawFrom, 'No tienes solicitudes pendientes en este momento.')
         }
       }
-      return reply.send('ok')
+      return reply.send(TWIML_EMPTY)
     }
 
     // ── Rechazar ─────────────────────────────────────────────────────
@@ -122,7 +123,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
         await rejectAssignment(assignment.id)
         await sendText(rawFrom, 'Entendido, gracias. Te contactaremos para el próximo caso.')
       }
-      return reply.send('ok')
+      return reply.send(TWIML_EMPTY)
     }
 
     // ── Keywords de estado ───────────────────────────────────────────
@@ -140,7 +141,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
         })
         await sendText(rawFrom, REPLIES[nextStatus] || 'Estado actualizado.')
       }
-      return reply.send('ok')
+      return reply.send(TWIML_EMPTY)
     }
 
     // ── Evidencias ───────────────────────────────────────────────────
@@ -157,6 +158,6 @@ export default async function whatsappRoutes(app: FastifyInstance) {
       }
     }
 
-    return reply.send('ok')
+    return reply.send(TWIML_EMPTY)
   })
 }
