@@ -36,14 +36,14 @@ export async function getServiceById(id: string, tenantId: string) {
   return db.service.findFirst({
     where: { id, tenantId },
     include: {
-      client:      true,
-      serviceType: { include: { category: true } },
-      frontAgent:  { select: { id: true, name: true, email: true } },
-      backAgent:   { select: { id: true, name: true, email: true } },
-      assignments: { include: { provider: { select: { name: true, whatsapp: true, type: true } } }, orderBy: { sentAt: 'desc' } },
-      events:      { orderBy: { createdAt: 'asc' } },
-      evidences:   { orderBy: { createdAt: 'desc' } },
-      appointments:{ orderBy: { scheduledAt: 'asc' } },
+      client:       true,
+      serviceType:  { include: { category: true } },
+      frontAgent:   { select: { id: true, name: true, email: true } },
+      backAgent:    { select: { id: true, name: true, email: true } },
+      assignments:  { include: { provider: { select: { name: true, whatsapp: true, type: true } } }, orderBy: { sentAt: 'desc' } },
+      events:       { orderBy: { createdAt: 'asc' } },
+      evidences:    { orderBy: { createdAt: 'desc' } },
+      appointments: { orderBy: { scheduledAt: 'asc' } },
     },
   })
 }
@@ -55,82 +55,50 @@ export async function countByStatus(tenantId: string) {
 }
 
 export async function createService(data: {
-  tenantId: string
-  clientName: string
-  clientPhone: string
-  clientPolicyNumber?: string
-  serviceTypeId: string
+  tenantId: string; clientName: string; clientPhone: string
+  clientPolicyNumber?: string; serviceTypeId: string
   location: { address: string; lat?: number; lng?: number }
-  notes?: string
-  frontAgentId?: string
+  notes?: string; frontAgentId?: string
 }) {
-  // Find or create client
-  let client = await db.client.findFirst({
-    where: { tenantId: data.tenantId, phone: data.clientPhone },
-  })
+  let client = await db.client.findFirst({ where: { tenantId: data.tenantId, phone: data.clientPhone } })
   if (!client) {
     client = await db.client.create({
-      data: {
-        tenantId:     data.tenantId,
-        name:         data.clientName,
-        phone:        data.clientPhone,
-        policyNumber: data.clientPolicyNumber,
-      },
+      data: { tenantId: data.tenantId, name: data.clientName, phone: data.clientPhone, policyNumber: data.clientPolicyNumber },
     })
   }
-
   const service = await db.service.create({
-    data: {
-      tenantId:      data.tenantId,
-      clientId:      client.id,
-      serviceTypeId: data.serviceTypeId,
-      location:      data.location,
-      notes:         data.notes,
-      frontAgentId:  data.frontAgentId,
-      status:        'received',
-    },
-    include: {
-      client:      true,
-      serviceType: { include: { category: true } },
-    },
+    data: { tenantId: data.tenantId, clientId: client.id, serviceTypeId: data.serviceTypeId, location: data.location, notes: data.notes, frontAgentId: data.frontAgentId, status: 'received' },
+    include: { client: true, serviceType: { include: { category: true } } },
   })
-
-  // Register creation event
-  await db.serviceEvent.create({
-    data: {
-      serviceId: service.id,
-      eventType: 'created',
-      payload:   { message: 'Servicio creado' },
-    },
-  })
-
+  await db.serviceEvent.create({ data: { serviceId: service.id, eventType: 'created', payload: { message: 'Servicio creado' } } })
   return service
 }
 
 export async function updateServiceStatus(id: string, tenantId: string, status: string, notes?: string) {
   const service = await db.service.update({
     where: { id },
-    data: {
-      status,
-      ...(status === 'completed' ? { completedAt: new Date() } : {}),
-    },
+    data: { status, ...(status === 'completed' ? { completedAt: new Date() } : {}) },
   })
-
-  await db.serviceEvent.create({
-    data: {
-      serviceId: id,
-      eventType: 'status_changed',
-      payload:   { status, notes: notes ?? '' },
-    },
-  })
-
+  await db.serviceEvent.create({ data: { serviceId: id, eventType: 'status_changed', payload: { status, notes: notes ?? '' } } })
   return service
 }
 
 export async function listServiceTypes(tenantId: string) {
-  return db.serviceType.findMany({
-    where: { OR: [{ tenantId }, { tenantId: null }] },
+  // Obtener tipos globales (sin tenant) y tipos del tenant, sin duplicados por nombre
+  const types = await db.serviceType.findMany({
+    where: { OR: [{ tenantId: null }, { tenantId }] },
     include: { category: true },
     orderBy: [{ category: { name: 'asc' } }, { name: 'asc' }],
   })
+
+  // Deduplicar por nombre — preferir los del tenant si hay conflicto
+  const seen = new Map<string, typeof types[0]>()
+  for (const t of types) {
+    const key = t.name.toLowerCase().trim()
+    if (!seen.has(key) || t.tenantId === tenantId) {
+      seen.set(key, t)
+    }
+  }
+
+  return Array.from(seen.values())
 }
