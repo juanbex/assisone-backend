@@ -16,35 +16,37 @@ const REPLIES: Record<string, string> = {
   completed:   '✅ Servicio finalizado. ¡Gracias!',
 }
 
-// Normaliza el número para búsqueda — acepta cualquier formato
 function normalizePhone(raw: string): string[] {
   const digits = raw.replace(/\D/g, '')
   const variants = new Set<string>()
-  variants.add(digits)                          // 573023286699
-  variants.add(`+${digits}`)                   // +573023286699
+  variants.add(digits)
+  variants.add(`+${digits}`)
   if (digits.startsWith('57')) {
-    variants.add(digits.slice(2))              // 3023286699
-    variants.add(`+${digits.slice(2)}`)        // +3023286699
+    variants.add(digits.slice(2))
+    variants.add(`+${digits.slice(2)}`)
   } else {
-    variants.add(`57${digits}`)               // 573023286699
-    variants.add(`+57${digits}`)              // +573023286699
+    variants.add(`57${digits}`)
+    variants.add(`+57${digits}`)
   }
   return Array.from(variants)
 }
+
+const ACCEPT_KEYWORDS = ['aceptar', 'acepto', 'si', 'sí', 'ok', 'yes']
+const REJECT_KEYWORDS = ['rechazar', 'no puedo', 'no', 'rechazado']
 
 export default async function whatsappRoutes(app: FastifyInstance) {
   app.get('/whatsapp', async (_req, reply) => reply.send('ok'))
 
   app.post('/whatsapp', async (req: any, reply) => {
-    const body    = req.body as any
-    const rawFrom = (body?.From ?? '').replace('whatsapp:', '').trim()
-    const msgBody = (body?.Body ?? '').trim().toUpperCase()
+    const body     = req.body as any
+    const rawFrom  = (body?.From ?? '').replace('whatsapp:', '').trim()
+    const msgBody  = (body?.Body ?? '').trim()
+    const msgLower = msgBody.toLowerCase()
 
     if (!rawFrom) return reply.send('ok')
 
     const phoneVariants = normalizePhone(rawFrom)
 
-    // Helper para buscar assignment con cualquier variante del número
     const findPendingAssignment = () =>
       db.serviceAssignment.findFirst({
         where: { provider: { whatsapp: { in: phoneVariants } }, status: 'pending' },
@@ -57,7 +59,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
       })
 
     // ── Aceptar ──────────────────────────────────────────────────────
-    if (msgBody === 'ACEPTO' || msgBody === 'ACEPTAR' || msgBody === 'SI' || msgBody === 'SÍ') {
+    if (ACCEPT_KEYWORDS.includes(msgLower)) {
       const assignment = await findPendingAssignment()
       if (assignment) {
         const result = await acceptAssignment(assignment.id, rawFrom)
@@ -73,7 +75,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
     }
 
     // ── Rechazar ─────────────────────────────────────────────────────
-    if (msgBody === 'NO PUEDO' || msgBody === 'RECHAZAR' || msgBody === 'NO') {
+    if (REJECT_KEYWORDS.includes(msgLower)) {
       const assignment = await findPendingAssignment()
       if (assignment) {
         await rejectAssignment(assignment.id)
@@ -83,7 +85,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
     }
 
     // ── Keywords de estado ───────────────────────────────────────────
-    const nextStatus = STATUS_MAP[msgBody]
+    const nextStatus = STATUS_MAP[msgBody.toUpperCase()]
     if (nextStatus) {
       const assignment = await findAcceptedAssignment()
       if (assignment) {
