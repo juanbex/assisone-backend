@@ -10,7 +10,7 @@ export async function buildApp() {
   await app.register(cors, { origin: true })
   await app.register(jwt, { secret: process.env.JWT_SECRET! })
   await app.register(multipart)
-  await app.register(formBody) // ← para parsear Twilio (application/x-www-form-urlencoded)
+  await app.register(formBody)
 
   app.get('/health', async () => ({ status: 'ok', service: 'assisone-api', version: '0.1.0' }))
 
