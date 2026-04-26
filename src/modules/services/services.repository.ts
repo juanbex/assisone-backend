@@ -1,11 +1,8 @@
 import { db } from '../../shared/lib/db'
+import { startOfDay, endOfDay } from 'date-fns'
 
 export async function listServices(params: {
-  tenantId: string
-  status?: string
-  search?: string
-  page?: number
-  limit?: number
+  tenantId: string; status?: string; search?: string; page?: number; limit?: number
 }) {
   const { tenantId, status, search, page = 1, limit = 50 } = params
   const skip = (page - 1) * limit
@@ -49,15 +46,36 @@ export async function getServiceById(id: string, tenantId: string) {
 }
 
 export async function countByStatus(tenantId: string) {
-  const statuses = ['received','in_coordination','uncoordinated','coordinated','assigned','in_progress','completed','cancelled']
-  const counts = await Promise.all(statuses.map(s => db.service.count({ where: { tenantId, status: s } })))
-  return Object.fromEntries(statuses.map((s, i) => [s, counts[i]]))
+  const today = new Date()
+  const statuses = ['received','in_coordination','uncoordinated','coordinated','assigned','in_progress','in_service','completed','cancelled']
+  
+  const [counts, completedToday] = await Promise.all([
+    Promise.all(statuses.map(s => db.service.count({ where: { tenantId, status: s } }))),
+    db.service.count({
+      where: {
+        tenantId,
+        status: 'completed',
+        completedAt: {
+          gte: startOfDay(today),
+          lte: endOfDay(today),
+        },
+      },
+    }),
+  ])
+
+  const result = Object.fromEntries(statuses.map((s, i) => [s, counts[i]]))
+  const total = statuses.reduce((acc, s) => acc + result[s], 0)
+
+  // Activos = todo lo que no está finalizado o cancelado
+  const active = total - result.completed - result.cancelled
+
+  return { ...result, total, active, completed_today: completedToday }
 }
 
 export async function createService(data: {
   tenantId: string; clientName: string; clientPhone: string
   clientPolicyNumber?: string; serviceTypeId: string
-  location: { address: string; lat?: number; lng?: number }
+  location: { address: string; lat?: number; lng?: number; durationMinutes?: number }
   notes?: string; frontAgentId?: string
 }) {
   let client = await db.client.findFirst({ where: { tenantId: data.tenantId, phone: data.clientPhone } })
@@ -67,7 +85,10 @@ export async function createService(data: {
     })
   }
   const service = await db.service.create({
-    data: { tenantId: data.tenantId, clientId: client.id, serviceTypeId: data.serviceTypeId, location: data.location, notes: data.notes, frontAgentId: data.frontAgentId, status: 'received' },
+    data: {
+      tenantId: data.tenantId, clientId: client.id, serviceTypeId: data.serviceTypeId,
+      location: data.location, notes: data.notes, frontAgentId: data.frontAgentId, status: 'received',
+    },
     include: { client: true, serviceType: { include: { category: true } } },
   })
   await db.serviceEvent.create({ data: { serviceId: service.id, eventType: 'created', payload: { message: 'Servicio creado' } } })
@@ -84,21 +105,15 @@ export async function updateServiceStatus(id: string, tenantId: string, status: 
 }
 
 export async function listServiceTypes(tenantId: string) {
-  // Obtener tipos globales (sin tenant) y tipos del tenant, sin duplicados por nombre
   const types = await db.serviceType.findMany({
     where: { OR: [{ tenantId: null }, { tenantId }] },
     include: { category: true },
     orderBy: [{ category: { name: 'asc' } }, { name: 'asc' }],
   })
-
-  // Deduplicar por nombre — preferir los del tenant si hay conflicto
   const seen = new Map<string, typeof types[0]>()
   for (const t of types) {
     const key = t.name.toLowerCase().trim()
-    if (!seen.has(key) || t.tenantId === tenantId) {
-      seen.set(key, t)
-    }
+    if (!seen.has(key) || t.tenantId === tenantId) seen.set(key, t)
   }
-
   return Array.from(seen.values())
 }
