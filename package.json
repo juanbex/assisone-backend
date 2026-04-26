@@ -5,9 +5,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "db:migrate": "prisma migrate dev",
-    "db:generate": "prisma generate",
-    "db:studio": "prisma studio"
+    "db:generate": "prisma generate"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
@@ -18,6 +16,7 @@
     "@prisma/client": "^5.22.0",
     "bcryptjs": "^2.4.3",
     "bullmq": "^5.13.0",
+    "date-fns": "^3.6.0",
     "fastify": "^4.28.1",
     "ioredis": "^5.4.1",
     "twilio": "^5.3.7",
