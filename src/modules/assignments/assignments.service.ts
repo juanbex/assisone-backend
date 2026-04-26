@@ -77,7 +77,17 @@ export async function startCoordination(serviceId: string) {
 }
 
 export async function acceptAssignment(assignmentId: string, from: string) {
-  const assignment = await db.serviceAssignment.findUnique({ where: { id: assignmentId } })
+  const assignment = await db.serviceAssignment.findUnique({
+    where: { id: assignmentId },
+    include: {
+      service: {
+        include: {
+          serviceType: true,
+          client: true,
+        },
+      },
+    },
+  })
   if (!assignment || assignment.status !== 'pending') return null
 
   await db.serviceAssignment.update({ where: { id: assignmentId }, data: { status: 'accepted', respondedAt: new Date() } })
@@ -106,4 +116,41 @@ export async function rejectAssignment(assignmentId: string) {
   if (!assignment || assignment.status !== 'pending') return null
   await db.serviceAssignment.update({ where: { id: assignmentId }, data: { status: 'rejected', respondedAt: new Date() } })
   return assignment
+}
+
+export async function saveProviderEta(from: string, minutes: number) {
+  const assignment = await db.serviceAssignment.findFirst({
+    where: { provider: { whatsapp: { in: buildPhoneVariants(from) } }, status: 'accepted' },
+  })
+  if (!assignment) return null
+
+  await db.serviceAssignment.update({
+    where: { id: assignment.id },
+    data: { etaMinutes: minutes },
+  })
+
+  await db.serviceEvent.create({
+    data: {
+      serviceId: assignment.serviceId,
+      eventType: 'eta_set',
+      payload: { etaMinutes: minutes, providerWhatsapp: from },
+    },
+  })
+
+  return assignment
+}
+
+function buildPhoneVariants(raw: string): string[] {
+  const digits = raw.replace(/\D/g, '')
+  const variants = new Set<string>()
+  variants.add(digits)
+  variants.add(`+${digits}`)
+  if (digits.startsWith('57')) {
+    variants.add(digits.slice(2))
+    variants.add(`+${digits.slice(2)}`)
+  } else {
+    variants.add(`57${digits}`)
+    variants.add(`+57${digits}`)
+  }
+  return Array.from(variants)
 }
