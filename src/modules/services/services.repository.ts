@@ -1,5 +1,4 @@
 import { db } from '../../shared/lib/db'
-import { startOfDay, endOfDay } from 'date-fns'
 
 export async function listServices(params: {
   tenantId: string; status?: string; search?: string; page?: number; limit?: number
@@ -46,27 +45,26 @@ export async function getServiceById(id: string, tenantId: string) {
 }
 
 export async function countByStatus(tenantId: string) {
-  const today = new Date()
   const statuses = ['received','in_coordination','uncoordinated','coordinated','assigned','in_progress','in_service','completed','cancelled']
-  
+
+  // Inicio y fin de hoy en UTC
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0)
+  const endOfToday   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+
   const [counts, completedToday] = await Promise.all([
     Promise.all(statuses.map(s => db.service.count({ where: { tenantId, status: s } }))),
     db.service.count({
       where: {
         tenantId,
         status: 'completed',
-        completedAt: {
-          gte: startOfDay(today),
-          lte: endOfDay(today),
-        },
+        completedAt: { gte: startOfToday, lte: endOfToday },
       },
     }),
   ])
 
-  const result = Object.fromEntries(statuses.map((s, i) => [s, counts[i]]))
-  const total = statuses.reduce((acc, s) => acc + result[s], 0)
-
-  // Activos = todo lo que no está finalizado o cancelado
+  const result: Record<string, number> = Object.fromEntries(statuses.map((s, i) => [s, counts[i]]))
+  const total  = statuses.reduce((acc, s) => acc + result[s], 0)
   const active = total - result.completed - result.cancelled
 
   return { ...result, total, active, completed_today: completedToday }
@@ -91,7 +89,9 @@ export async function createService(data: {
     },
     include: { client: true, serviceType: { include: { category: true } } },
   })
-  await db.serviceEvent.create({ data: { serviceId: service.id, eventType: 'created', payload: { message: 'Servicio creado' } } })
+  await db.serviceEvent.create({
+    data: { serviceId: service.id, eventType: 'created', payload: { message: 'Servicio creado' } },
+  })
   return service
 }
 
@@ -100,7 +100,9 @@ export async function updateServiceStatus(id: string, tenantId: string, status: 
     where: { id },
     data: { status, ...(status === 'completed' ? { completedAt: new Date() } : {}) },
   })
-  await db.serviceEvent.create({ data: { serviceId: id, eventType: 'status_changed', payload: { status, notes: notes ?? '' } } })
+  await db.serviceEvent.create({
+    data: { serviceId: id, eventType: 'status_changed', payload: { status, notes: notes ?? '' } },
+  })
   return service
 }
 
