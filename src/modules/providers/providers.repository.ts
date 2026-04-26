@@ -10,22 +10,17 @@ export async function listProviders(params: { type?: string; search?: string; zo
       { whatsapp: { contains: search } },
     ]
   }
-
   const providers = await db.provider.findMany({
     where,
-    orderBy: { createdAt: 'desc' },
-    include: {
-      _count: { select: { assignments: true } },
-    },
+    orderBy: { name: 'asc' },
+    include: { _count: { select: { assignments: true } } },
   })
-
   if (zone) {
     return providers.filter((p: any) => {
       const zones: string[] = p.coverageZones ?? []
       return zones.some(z => z.toLowerCase().includes(zone.toLowerCase()))
     })
   }
-
   return providers
 }
 
@@ -54,13 +49,22 @@ export async function getProviderById(id: string) {
 export async function createProvider(data: {
   name: string; whatsapp: string; type: string; coverageZones: string[]
 }) {
-  return db.provider.create({ data: { ...data, coverageZones: data.coverageZones } })
+  return db.provider.create({ data })
 }
 
 export async function updateProvider(id: string, data: {
   name?: string; whatsapp?: string; type?: string; coverageZones?: string[]
 }) {
   return db.provider.update({ where: { id }, data })
+}
+
+export async function deleteProvider(id: string) {
+  // Cancelar assignments pendientes antes de eliminar
+  await db.serviceAssignment.updateMany({
+    where: { providerId: id, status: 'pending' },
+    data: { status: 'cancelled' },
+  })
+  return db.provider.delete({ where: { id } })
 }
 
 export async function getProviderStats() {
