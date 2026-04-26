@@ -2,6 +2,7 @@ import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import jwt from '@fastify/jwt'
 import multipart from '@fastify/multipart'
+import formBody from '@fastify/formbody'
 
 export async function buildApp() {
   const app = Fastify({ logger: true })
@@ -9,6 +10,7 @@ export async function buildApp() {
   await app.register(cors, { origin: true })
   await app.register(jwt, { secret: process.env.JWT_SECRET! })
   await app.register(multipart)
+  await app.register(formBody) // ← para parsear Twilio (application/x-www-form-urlencoded)
 
   app.get('/health', async () => ({ status: 'ok', service: 'assisone-api', version: '0.1.0' }))
 
