@@ -1,5 +1,5 @@
 import { db } from '../../shared/lib/db'
-import { whatsappPushQueue, coordinationTimerQueue } from '../../shared/lib/bullmq'
+import { whatsappPushQueue, coordinationTimerQueue, arrivalCheckQueue } from '../../shared/lib/bullmq'
 import { sendText } from '../notifications/whatsapp.service'
 
 const TIMER_DELAY_MS = 10 * 60 * 1000
@@ -131,9 +131,7 @@ export async function saveProviderEta(from: string, minutes: number) {
   const assignment = await db.serviceAssignment.findFirst({
     where: { provider: { whatsapp: { in: buildPhoneVariants(from) } }, status: 'accepted' },
     include: {
-      service: {
-        include: { client: true, serviceType: true }
-      },
+      service: { include: { client: true, serviceType: true } },
       provider: true,
     },
   })
@@ -152,33 +150,89 @@ export async function saveProviderEta(from: string, minutes: number) {
     },
   })
 
-  // Notificar al cliente via WhatsApp
+  // Notificar al cliente que el proveedor va en camino con ETA
   const client = assignment.service?.client
+  const serviceType = assignment.service?.serviceType?.name ?? 'servicio'
+  const providerName = assignment.provider?.name ?? 'El proveedor'
+
   if (client?.phone) {
     try {
-      const serviceType = assignment.service?.serviceType?.name ?? 'servicio'
-      const providerName = assignment.provider?.name ?? 'el proveedor'
       await sendText(
         client.phone,
         `✅ *Tu ${serviceType} está confirmado*\n\n` +
         `🚗 ${providerName} va en camino hacia ti.\n` +
         `⏱ *Tiempo estimado de llegada: ${minutes} minutos*\n\n` +
-        `Te notificaremos cuando esté cerca. ¡Gracias por tu paciencia!`
+        `Te confirmaremos cuando llegue. ¡Gracias por tu paciencia!`
       )
     } catch (err: any) {
-      console.error(`[eta] Error notificando cliente ${client.phone}:`, err.message)
+      console.error(`[eta] Error notificando cliente:`, err.message)
     }
+
+    // Programar verificación de llegada cuando venza el ETA
+    await arrivalCheckQueue.add(
+      `arrival-${assignment.serviceId}`,
+      {
+        serviceId:   assignment.serviceId,
+        clientPhone: client.phone,
+        clientName:  client.name,
+        serviceType,
+        providerName,
+        assignmentId: assignment.id,
+      },
+      {
+        delay:  minutes * 60 * 1000,
+        jobId: `arrival-${assignment.serviceId}`,
+      }
+    )
+    console.log(`[eta] Verificación de llegada programada en ${minutes} min para servicio ${assignment.serviceId}`)
   }
 
   return assignment
 }
 
-// Endpoint para dashboard de seguimiento
+// Confirmación de llegada del cliente
+export async function handleClientArrivalConfirmation(clientPhone: string, confirmed: boolean) {
+  // Buscar servicio activo del cliente (en assigned o in_progress)
+  const service = await db.service.findFirst({
+    where: {
+      client: { phone: { in: buildPhoneVariants(clientPhone) } },
+      status: { in: ['assigned', 'in_progress', 'coordinated'] },
+    },
+    include: { client: true, serviceType: true },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  if (!service) return null
+
+  if (confirmed) {
+    // Cliente confirma que el técnico llegó → En prestación
+    await db.service.update({ where: { id: service.id }, data: { status: 'in_service' } })
+    await db.serviceEvent.create({
+      data: {
+        serviceId: service.id,
+        eventType: 'client_confirmed_arrival',
+        payload: { clientPhone, confirmed: true },
+      },
+    })
+  } else {
+    // Cliente dice que NO llegó → registrar evento + alerta para agente back
+    await db.serviceEvent.create({
+      data: {
+        serviceId: service.id,
+        eventType: 'client_denied_arrival',
+        payload: { clientPhone, confirmed: false, alert: 'El cliente reporta que el proveedor NO ha llegado' },
+      },
+    })
+  }
+
+  return service
+}
+
 export async function getServicesForTracking(tenantId: string) {
   const services = await db.service.findMany({
     where: {
       tenantId,
-      status: { in: ['coordinated', 'assigned', 'in_progress'] },
+      status: { in: ['coordinated', 'assigned', 'in_progress', 'in_service'] },
     },
     orderBy: { createdAt: 'desc' },
     include: {
