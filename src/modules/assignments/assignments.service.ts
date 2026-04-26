@@ -1,10 +1,26 @@
 import { db } from '../../shared/lib/db'
 import { whatsappPushQueue, coordinationTimerQueue } from '../../shared/lib/bullmq'
+import { sendText } from '../notifications/whatsapp.service'
 
 const TIMER_DELAY_MS = 10 * 60 * 1000
 
 function normalize(str: string): string {
   return str.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '-').trim()
+}
+
+export function buildPhoneVariants(raw: string): string[] {
+  const digits = raw.replace(/\D/g, '')
+  const variants = new Set<string>()
+  variants.add(digits)
+  variants.add(`+${digits}`)
+  if (digits.startsWith('57')) {
+    variants.add(digits.slice(2))
+    variants.add(`+${digits.slice(2)}`)
+  } else {
+    variants.add(`57${digits}`)
+    variants.add(`+57${digits}`)
+  }
+  return Array.from(variants)
 }
 
 export async function startCoordination(serviceId: string) {
@@ -79,14 +95,7 @@ export async function startCoordination(serviceId: string) {
 export async function acceptAssignment(assignmentId: string, from: string) {
   const assignment = await db.serviceAssignment.findUnique({
     where: { id: assignmentId },
-    include: {
-      service: {
-        include: {
-          serviceType: true,
-          client: true,
-        },
-      },
-    },
+    include: { service: { include: { serviceType: true, client: true } } },
   })
   if (!assignment || assignment.status !== 'pending') return null
 
@@ -121,6 +130,12 @@ export async function rejectAssignment(assignmentId: string) {
 export async function saveProviderEta(from: string, minutes: number) {
   const assignment = await db.serviceAssignment.findFirst({
     where: { provider: { whatsapp: { in: buildPhoneVariants(from) } }, status: 'accepted' },
+    include: {
+      service: {
+        include: { client: true, serviceType: true }
+      },
+      provider: true,
+    },
   })
   if (!assignment) return null
 
@@ -137,20 +152,50 @@ export async function saveProviderEta(from: string, minutes: number) {
     },
   })
 
+  // Notificar al cliente via WhatsApp
+  const client = assignment.service?.client
+  if (client?.phone) {
+    try {
+      const serviceType = assignment.service?.serviceType?.name ?? 'servicio'
+      const providerName = assignment.provider?.name ?? 'el proveedor'
+      await sendText(
+        client.phone,
+        `✅ *Tu ${serviceType} está confirmado*\n\n` +
+        `🚗 ${providerName} va en camino hacia ti.\n` +
+        `⏱ *Tiempo estimado de llegada: ${minutes} minutos*\n\n` +
+        `Te notificaremos cuando esté cerca. ¡Gracias por tu paciencia!`
+      )
+    } catch (err: any) {
+      console.error(`[eta] Error notificando cliente ${client.phone}:`, err.message)
+    }
+  }
+
   return assignment
 }
 
-function buildPhoneVariants(raw: string): string[] {
-  const digits = raw.replace(/\D/g, '')
-  const variants = new Set<string>()
-  variants.add(digits)
-  variants.add(`+${digits}`)
-  if (digits.startsWith('57')) {
-    variants.add(digits.slice(2))
-    variants.add(`+${digits.slice(2)}`)
-  } else {
-    variants.add(`57${digits}`)
-    variants.add(`+57${digits}`)
-  }
-  return Array.from(variants)
+// Endpoint para dashboard de seguimiento
+export async function getServicesForTracking(tenantId: string) {
+  const services = await db.service.findMany({
+    where: {
+      tenantId,
+      status: { in: ['coordinated', 'assigned', 'in_progress'] },
+    },
+    orderBy: { createdAt: 'desc' },
+    include: {
+      client:      { select: { name: true, phone: true, policyNumber: true } },
+      serviceType: { select: { name: true, category: { select: { name: true } } } },
+      frontAgent:  { select: { name: true } },
+      backAgent:   { select: { name: true } },
+      assignments: {
+        where: { status: 'accepted' },
+        take: 1,
+        include: { provider: { select: { name: true, whatsapp: true } } },
+      },
+    },
+  })
+
+  return services.map(s => ({
+    ...s,
+    acceptedAssignment: s.assignments[0] ?? null,
+  }))
 }
