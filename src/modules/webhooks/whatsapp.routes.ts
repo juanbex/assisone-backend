@@ -53,12 +53,18 @@ export default async function whatsappRoutes(app: FastifyInstance) {
         orderBy: { sentAt: 'desc' },
       })
 
+    const findCancelledAssignment = () =>
+      db.serviceAssignment.findFirst({
+        where: { provider: { whatsapp: { in: phoneVariants } }, status: 'cancelled' },
+        orderBy: { sentAt: 'desc' },
+      })
+
     const findAcceptedAssignment = () =>
       db.serviceAssignment.findFirst({
         where: { provider: { whatsapp: { in: phoneVariants } }, status: 'accepted' },
       })
 
-    // ── ETA: proveedor responde con número de minutos ─────────────────
+    // ── ETA ──────────────────────────────────────────────────────────
     const etaMatch = msgBody.match(/^(\d{1,3})\s*(min|minutos?)?$/i)
     if (etaMatch) {
       const minutes = parseInt(etaMatch[1])
@@ -74,9 +80,11 @@ export default async function whatsappRoutes(app: FastifyInstance) {
 
     // ── Aceptar ──────────────────────────────────────────────────────
     if (ACCEPT_KEYWORDS.includes(msgLower)) {
-      const assignment = await findPendingAssignment()
-      if (assignment) {
-        const result = await acceptAssignment(assignment.id, rawFrom) as any
+      const pending = await findPendingAssignment()
+
+      if (pending) {
+        // Tiene asignación pendiente — intentar aceptar
+        const result = await acceptAssignment(pending.id, rawFrom) as any
         if (result) {
           const service = result.service
           const location = (service?.location as any)?.address ?? 'Ver detalles en el sistema'
@@ -92,10 +100,17 @@ export default async function whatsappRoutes(app: FastifyInstance) {
             `⏱ *¿En cuántos minutos llegas?*\nResponde solo con el número (ej: *15*)`
           )
         } else {
-          await sendText(rawFrom, 'Este servicio ya fue tomado por otro proveedor.')
+          // Race condition — otro proveedor lo tomó al mismo tiempo
+          await sendText(rawFrom, '⚠️ Este servicio ya fue tomado por otro proveedor en este momento. Estaremos en contacto para el próximo caso.')
         }
       } else {
-        await sendText(rawFrom, 'No tienes solicitudes pendientes en este momento.')
+        // No hay pendiente — verificar si fue cancelado (ya tomado por otro)
+        const cancelled = await findCancelledAssignment()
+        if (cancelled) {
+          await sendText(rawFrom, '⚠️ Este servicio ya fue coordinado con otro proveedor. Gracias por tu disposición, te contactaremos para el próximo caso.')
+        } else {
+          await sendText(rawFrom, 'No tienes solicitudes de servicio pendientes en este momento.')
+        }
       }
       return reply.send('ok')
     }
@@ -105,7 +120,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
       const assignment = await findPendingAssignment()
       if (assignment) {
         await rejectAssignment(assignment.id)
-        await sendText(rawFrom, 'Entendido, gracias.')
+        await sendText(rawFrom, 'Entendido, gracias. Te contactaremos para el próximo caso.')
       }
       return reply.send('ok')
     }
