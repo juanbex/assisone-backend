@@ -1,8 +1,8 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../../shared/lib/db'
-import { sendText, sendAssignmentConfirmation } from '../notifications/whatsapp.service'
+import { sendText } from '../notifications/whatsapp.service'
 import { evidenceUploadQueue } from '../../shared/lib/bullmq'
-import { acceptAssignment, rejectAssignment, saveProviderEta } from '../assignments/assignments.service'
+import { acceptAssignment, rejectAssignment, saveProviderEta, handleClientArrivalConfirmation, buildPhoneVariants } from '../assignments/assignments.service'
 
 const STATUS_MAP: Record<string, string> = {
   'EN CAMINO':  'assigned',
@@ -12,36 +12,19 @@ const STATUS_MAP: Record<string, string> = {
 
 const REPLIES: Record<string, string> = {
   assigned:    '👍 El cliente fue notificado. ¡Buen camino!',
-  in_progress: '📸 Cuando termines sube las evidencias y responde FINALIZADO.',
+  in_progress: '📸 Perfecto. Cuando termines sube las evidencias y responde FINALIZADO.',
   completed:   '✅ Servicio finalizado. ¡Gracias!',
 }
 
-function buildPhoneVariants(raw: string): string[] {
-  const digits = raw.replace(/\D/g, '')
-  const variants = new Set<string>()
-  variants.add(digits)
-  variants.add(`+${digits}`)
-  if (digits.startsWith('57')) {
-    variants.add(digits.slice(2))
-    variants.add(`+${digits.slice(2)}`)
-  } else {
-    variants.add(`57${digits}`)
-    variants.add(`+57${digits}`)
-  }
-  return Array.from(variants)
-}
-
-// Respuesta vacía que Twilio entiende — NO reenvía nada al usuario
-const TWIML_EMPTY = '<Response></Response>'
-
 const ACCEPT_KEYWORDS = ['aceptar', 'acepto', 'si', 'sí', 'ok', 'yes']
 const REJECT_KEYWORDS = ['rechazar', 'no puedo', 'no', 'rechazado']
+
+const TWIML_EMPTY = '<Response></Response>'
 
 export default async function whatsappRoutes(app: FastifyInstance) {
   app.get('/whatsapp', async (_req, reply) => reply.send('ok'))
 
   app.post('/whatsapp', async (req: any, reply) => {
-    // Siempre responder TwiML vacío para que Twilio no reenvíe nada
     reply.header('Content-Type', 'text/xml')
 
     const body     = req.body as any
@@ -53,6 +36,47 @@ export default async function whatsappRoutes(app: FastifyInstance) {
 
     const phoneVariants = buildPhoneVariants(rawFrom)
 
+    // ── Determinar si es cliente o proveedor ─────────────────────────
+    const isProvider = await db.provider.findFirst({
+      where: { whatsapp: { in: phoneVariants } },
+    })
+
+    // ── FLUJO CLIENTE ────────────────────────────────────────────────
+    if (!isProvider) {
+      const yesKeywords = ['si', 'sí', 'yes', 'si llegó', 'ya llegó', 'llegó', 'llego']
+      const noKeywords  = ['no', 'no llegó', 'no ha llegado', 'todavia no', 'todavía no', 'aun no', 'aún no']
+
+      if (yesKeywords.includes(msgLower)) {
+        const service = await handleClientArrivalConfirmation(rawFrom, true)
+        if (service) {
+          await sendText(rawFrom,
+            `✅ ¡Perfecto! Nos alegra que el técnico haya llegado.\n\n` +
+            `Tu servicio de *${(service as any).serviceType?.name}* está en curso.\n` +
+            `Te notificaremos al finalizar. ¡Que todo salga bien!`
+          )
+        }
+        return reply.send(TWIML_EMPTY)
+      }
+
+      if (noKeywords.includes(msgLower)) {
+        const service = await handleClientArrivalConfirmation(rawFrom, false)
+        if (service) {
+          await sendText(rawFrom,
+            `⚠️ Lamentamos el inconveniente. Estamos verificando la situación con el proveedor.\n\n` +
+            `Un agente de AssisPrex se comunicará contigo en los próximos minutos.\n` +
+            `Gracias por tu paciencia.`
+          )
+          // El agente back verá la alerta en el dashboard de seguimiento
+          console.log(`[webhook] ALERTA: Cliente ${rawFrom} reporta que proveedor NO llegó en servicio ${service.id}`)
+        }
+        return reply.send(TWIML_EMPTY)
+      }
+
+      // Cliente envía otro mensaje — no hacer nada
+      return reply.send(TWIML_EMPTY)
+    }
+
+    // ── FLUJO PROVEEDOR ──────────────────────────────────────────────
     const findPendingAssignment = () =>
       db.serviceAssignment.findFirst({
         where: { provider: { whatsapp: { in: phoneVariants } }, status: 'pending' },
@@ -70,7 +94,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
         where: { provider: { whatsapp: { in: phoneVariants } }, status: 'accepted' },
       })
 
-    // ── ETA ──────────────────────────────────────────────────────────
+    // ETA: responde con número de minutos
     const etaMatch = msgBody.match(/^(\d{1,3})\s*(min|minutos?)?$/i)
     if (etaMatch) {
       const minutes = parseInt(etaMatch[1])
@@ -84,7 +108,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
       }
     }
 
-    // ── Aceptar ──────────────────────────────────────────────────────
+    // Aceptar
     if (ACCEPT_KEYWORDS.includes(msgLower)) {
       const pending = await findPendingAssignment()
       if (pending) {
@@ -116,7 +140,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
       return reply.send(TWIML_EMPTY)
     }
 
-    // ── Rechazar ─────────────────────────────────────────────────────
+    // Rechazar
     if (REJECT_KEYWORDS.includes(msgLower)) {
       const assignment = await findPendingAssignment()
       if (assignment) {
@@ -126,7 +150,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
       return reply.send(TWIML_EMPTY)
     }
 
-    // ── Keywords de estado ───────────────────────────────────────────
+    // Keywords de estado
     const nextStatus = STATUS_MAP[msgBody.toUpperCase()]
     if (nextStatus) {
       const assignment = await findAcceptedAssignment()
@@ -144,7 +168,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
       return reply.send(TWIML_EMPTY)
     }
 
-    // ── Evidencias ───────────────────────────────────────────────────
+    // Evidencias
     const numMedia = parseInt(body?.NumMedia ?? '0')
     if (numMedia > 0) {
       const mediaUrl  = body?.MediaUrl0
