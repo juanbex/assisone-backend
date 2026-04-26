@@ -1,84 +1,92 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../../shared/lib/db'
-import { sendText } from '../notifications/whatsapp.service'
+import { sendText, sendAssignmentConfirmation } from '../notifications/whatsapp.service'
 import { evidenceUploadQueue } from '../../shared/lib/bullmq'
 import { acceptAssignment, rejectAssignment } from '../assignments/assignments.service'
+import twilio from 'twilio'
 
 const STATUS_MAP: Record<string, string> = {
-  'EN CAMINO': 'assigned',
-  'LLEGUE':    'in_progress',
-  'FINALIZADO':'completed',
+  'EN CAMINO':  'assigned',
+  'LLEGUE':     'in_progress',
+  'FINALIZADO': 'completed',
 }
 
 const REPLIES: Record<string, string> = {
-  assigned:    'El cliente fue notificado. Buen camino!',
-  in_progress: 'Sube las evidencias y responde FINALIZADO al terminar.',
-  completed:   'Servicio finalizado. Gracias!',
+  assigned:    '👍 El cliente fue notificado. ¡Buen camino!',
+  in_progress: '📸 Cuando termines sube las evidencias y responde FINALIZADO.',
+  completed:   '✅ Servicio finalizado. ¡Gracias!',
 }
 
 export default async function whatsappRoutes(app: FastifyInstance) {
-  // Verificación del webhook
-  app.get('/whatsapp', async (req: any, reply) => {
-    if (req.query['hub.verify_token'] === process.env.WHATSAPP_VERIFY_TOKEN)
-      return reply.send(req.query['hub.challenge'])
-    reply.status(403).send('Forbidden')
-  })
+  // Verificación del webhook de Twilio (GET no aplica, pero dejamos por si acaso)
+  app.get('/whatsapp', async (_req, reply) => reply.send('ok'))
 
-  // Mensajes entrantes
+  // Mensajes entrantes desde Twilio (form-encoded)
   app.post('/whatsapp', async (req: any, reply) => {
-    const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]
-    if (!msg) return reply.send('ok')
-    const from: string = msg.from
+    // Twilio envía form-encoded (no JSON)
+    const body   = req.body as any
+    const from   = (body?.From ?? '').replace('whatsapp:', '')
+    const msgBody = (body?.Body ?? '').trim().toUpperCase()
 
-    // Botones Aceptar / Rechazar
-    if (msg.type === 'interactive') {
-      const btnId: string = msg.interactive.button_reply.id
-      const [action, assignmentId] = btnId.split('_')
+    if (!from) return reply.send('ok')
 
-      if (action === 'accept') {
-        const assignment = await acceptAssignment(assignmentId, from)
-        if (assignment) {
-          await sendText(from, 'Servicio aceptado! Cuando vayas en camino responde: EN CAMINO')
+    // ── Keywords de estado ───────────────────────────────────────────
+    const nextStatus = STATUS_MAP[msgBody]
+    if (nextStatus) {
+      const assignment = await db.serviceAssignment.findFirst({
+        where: { provider: { whatsapp: from }, status: 'accepted' },
+      })
+      if (assignment) {
+        await db.service.update({ where: { id: assignment.serviceId }, data: { status: nextStatus } })
+        await db.serviceEvent.create({
+          data: {
+            serviceId: assignment.serviceId,
+            eventType: 'provider_status_update',
+            payload: { status: nextStatus, keyword: msgBody, providerWhatsapp: from },
+          },
+        })
+        await sendText(from, REPLIES[nextStatus] || 'Estado actualizado.')
+      }
+      return reply.send('ok')
+    }
+
+    // ── Aceptar / Rechazar ───────────────────────────────────────────
+    if (msgBody === 'ACEPTO' || msgBody === 'ACEPTAR') {
+      const assignment = await db.serviceAssignment.findFirst({
+        where: { provider: { whatsapp: from }, status: 'pending' },
+        orderBy: { sentAt: 'desc' },
+      })
+      if (assignment) {
+        const result = await acceptAssignment(assignment.id, from)
+        if (result) {
+          await sendAssignmentConfirmation(from, assignment.serviceId)
         } else {
           await sendText(from, 'Este servicio ya fue tomado por otro proveedor.')
         }
       }
+      return reply.send('ok')
+    }
 
-      if (action === 'reject') {
-        await rejectAssignment(assignmentId)
+    if (msgBody === 'NO PUEDO' || msgBody === 'RECHAZAR' || msgBody === 'NO') {
+      const assignment = await db.serviceAssignment.findFirst({
+        where: { provider: { whatsapp: from }, status: 'pending' },
+        orderBy: { sentAt: 'desc' },
+      })
+      if (assignment) {
+        await rejectAssignment(assignment.id)
         await sendText(from, 'Entendido, gracias.')
       }
+      return reply.send('ok')
     }
 
-    // Keywords de estado
-    if (msg.type === 'text') {
-      const keyword = msg.text?.body?.trim().toUpperCase()
-      const nextStatus = STATUS_MAP[keyword]
-
-      if (nextStatus) {
-        const assignment = await db.serviceAssignment.findFirst({
-          where: { provider: { whatsapp: from }, status: 'accepted' },
-        })
-        if (assignment) {
-          await db.service.update({ where: { id: assignment.serviceId }, data: { status: nextStatus } })
-          await db.serviceEvent.create({
-            data: {
-              serviceId: assignment.serviceId,
-              eventType: 'provider_status_update',
-              payload: { status: nextStatus, keyword, providerWhatsapp: from },
-            },
-          })
-          await sendText(from, REPLIES[nextStatus] || 'Estado actualizado.')
-        }
-      }
-    }
-
-    // Evidencias (foto/documento)
-    if (msg.type === 'image' || msg.type === 'document') {
-      const mediaId = msg[msg.type]?.id
-      if (mediaId) {
-        await evidenceUploadQueue.add('upload', { mediaId, from, type: msg.type })
-        await sendText(from, 'Evidencia recibida')
+    // ── Evidencias (foto/documento) ──────────────────────────────────
+    const numMedia = parseInt(body?.NumMedia ?? '0')
+    if (numMedia > 0) {
+      const mediaUrl  = body?.MediaUrl0
+      const mediaType = body?.MediaContentType0 ?? 'image/jpeg'
+      if (mediaUrl) {
+        await evidenceUploadQueue.add('upload', { mediaUrl, from, type: mediaType.startsWith('image') ? 'image' : 'document' })
+        await sendText(from, '📸 Evidencia recibida.')
       }
     }
 
