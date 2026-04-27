@@ -5,22 +5,18 @@ import { evidenceUploadQueue } from '../../shared/lib/bullmq'
 import { acceptAssignment, rejectAssignment, saveProviderEta, handleClientArrivalConfirmation, buildPhoneVariants } from '../assignments/assignments.service'
 import { parseEtaText } from '../../shared/utils/eta-parser'
 
-const STATUS_MAP: Record<string, string> = {
-  'EN CAMINO':  'assigned',
-  'LLEGUE':     'in_progress',
-  'LLEG':       'in_progress',
-  'FINALIZADO': 'completed',
-  'FINALICE':   'completed',
-}
-
-const REPLIES: Record<string, string> = {
-  assigned:    '👍 El cliente fue notificado. ¡Buen camino!',
-  in_progress: '📸 Perfecto. Cuando termines sube las evidencias y responde FINALIZADO.',
-  completed:   '✅ Servicio finalizado. ¡Gracias!',
+// Keywords que solo registran eventos en el timeline (sin cambiar estado)
+const PROVIDER_EVENTS: Record<string, string> = {
+  'EN CAMINO': 'provider_en_camino',
+  'LLEGUE':    'provider_llegue',
+  'LLEGU':     'provider_llegue',
 }
 
 const ACCEPT_KEYWORDS = ['aceptar', 'acepto', 'si', 'sí', 'ok', 'yes', 'dale', 'listo', 'confirmo', 'confirmado']
 const REJECT_KEYWORDS = ['rechazar', 'rechazado', 'no puedo', 'no puedo atender', 'ocupado']
+
+// FINALIZADO sí cambia estado a completed
+const FINALIZADO_KEYWORDS = ['finalizado', 'finalice', 'finalize', 'termine', 'listo termine']
 
 const TWIML_EMPTY = '<Response></Response>'
 
@@ -36,6 +32,8 @@ export default async function whatsappRoutes(app: FastifyInstance) {
     const msgLower = msgBody.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 
     if (!rawFrom) return reply.send(TWIML_EMPTY)
+
+    console.log(`[webhook] De: ${rawFrom} | Mensaje: "${msgBody}"`)
 
     const phoneVariants = buildPhoneVariants(rawFrom)
 
@@ -64,8 +62,7 @@ export default async function whatsappRoutes(app: FastifyInstance) {
         const service = await handleClientArrivalConfirmation(rawFrom, false)
         if (service) {
           await sendText(rawFrom,
-            `⚠️ Lamentamos el inconveniente. Un agente de AssisPrex se comunicará contigo en los próximos minutos.\n` +
-            `Gracias por tu paciencia.`
+            `⚠️ Lamentamos el inconveniente. Un agente de AssisPrex se comunicará contigo en los próximos minutos. Gracias por tu paciencia.`
           )
         }
         return reply.send(TWIML_EMPTY)
@@ -97,10 +94,51 @@ export default async function whatsappRoutes(app: FastifyInstance) {
     if (etaMinutes !== null) {
       const assignment = await findAcceptedAssignment()
       if (assignment) {
-        await saveProviderEta(rawFrom, etaMinutes)
-        await sendText(rawFrom, `⏱ Perfecto, registramos *${etaMinutes} minutos* de tiempo estimado. ¡El cliente fue informado!`)
+        console.log(`[eta] Guardando ETA: ${etaMinutes} min para assignment ${assignment.id}`)
+        const result = await saveProviderEta(rawFrom, etaMinutes)
+        if (result) {
+          await sendText(rawFrom, `⏱ Perfecto, registramos *${etaMinutes} minutos* de tiempo estimado. ¡El cliente fue informado!`)
+        }
         return reply.send(TWIML_EMPTY)
       }
+    }
+
+    // ── FINALIZADO → cambiar estado a completed ───────────────────────
+    if (FINALIZADO_KEYWORDS.some(k => msgLower.includes(k))) {
+      const assignment = await findAcceptedAssignment()
+      if (assignment) {
+        await db.service.update({ where: { id: assignment.serviceId }, data: { status: 'completed', completedAt: new Date() } })
+        await db.serviceEvent.create({
+          data: {
+            serviceId: assignment.serviceId,
+            eventType: 'provider_finalizado',
+            payload: { keyword: msgBody, providerWhatsapp: rawFrom },
+          },
+        })
+        await sendText(rawFrom, '✅ Servicio finalizado. ¡Gracias por tu excelente servicio!')
+      }
+      return reply.send(TWIML_EMPTY)
+    }
+
+    // ── EN CAMINO / LLEGUE → solo registrar evento (no cambia estado) ─
+    const eventType = Object.entries(PROVIDER_EVENTS).find(([k]) => msgBody.toUpperCase().includes(k))?.[1]
+    if (eventType) {
+      const assignment = await findAcceptedAssignment()
+      if (assignment) {
+        await db.serviceEvent.create({
+          data: {
+            serviceId: assignment.serviceId,
+            eventType,
+            payload: { keyword: msgBody, providerWhatsapp: rawFrom },
+          },
+        })
+        if (eventType === 'provider_en_camino') {
+          await sendText(rawFrom, '👍 Registrado. El cliente fue notificado que vas en camino.')
+        } else {
+          await sendText(rawFrom, '📍 Registrado que llegaste. Cuando termines responde: *FINALIZADO*')
+        }
+      }
+      return reply.send(TWIML_EMPTY)
     }
 
     // ── Aceptar ───────────────────────────────────────────────────────
@@ -140,24 +178,6 @@ export default async function whatsappRoutes(app: FastifyInstance) {
       if (assignment) {
         await rejectAssignment(assignment.id)
         await sendText(rawFrom, 'Entendido, gracias. Te contactaremos para el próximo caso.')
-      }
-      return reply.send(TWIML_EMPTY)
-    }
-
-    // ── Keywords de estado ────────────────────────────────────────────
-    const nextStatus = Object.entries(STATUS_MAP).find(([k]) => msgBody.toUpperCase().includes(k))?.[1]
-    if (nextStatus) {
-      const assignment = await findAcceptedAssignment()
-      if (assignment) {
-        await db.service.update({ where: { id: assignment.serviceId }, data: { status: nextStatus } })
-        await db.serviceEvent.create({
-          data: {
-            serviceId: assignment.serviceId,
-            eventType: 'provider_status_update',
-            payload: { status: nextStatus, keyword: msgBody, providerWhatsapp: rawFrom },
-          },
-        })
-        await sendText(rawFrom, REPLIES[nextStatus] || 'Estado actualizado.')
       }
       return reply.send(TWIML_EMPTY)
     }
