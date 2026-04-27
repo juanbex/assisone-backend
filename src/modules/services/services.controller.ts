@@ -20,8 +20,7 @@ export async function getService(request: FastifyRequest, reply: FastifyReply) {
 export async function getStats(request: FastifyRequest, reply: FastifyReply) {
   const user = request.user as any
   const counts = await countByStatus(user.tenantId)
-  const total = Object.values(counts).reduce((a: number, b) => a + (b as number), 0)
-  return reply.send({ data: { total, ...counts } })
+  return reply.send({ data: counts })
 }
 
 export async function postService(request: FastifyRequest, reply: FastifyReply) {
@@ -41,11 +40,8 @@ export async function patchServiceStatus(request: FastifyRequest, reply: Fastify
   const { status, notes } = request.body as any
 
   try {
-    // Si el nuevo status es in_coordination → disparar flujo de coordinación real
     if (status === 'in_coordination') {
       const result = await startCoordination(id)
-
-      // startCoordination ya actualiza el status internamente
       const service = await getServiceById(id, user.tenantId)
       return reply.send({
         data: service,
@@ -56,7 +52,6 @@ export async function patchServiceStatus(request: FastifyRequest, reply: Fastify
       })
     }
 
-    // Para otros cambios de status → flujo normal
     const service = await updateServiceStatus(id, user.tenantId, status, notes)
     return reply.send({ data: service })
   } catch (err: any) {
