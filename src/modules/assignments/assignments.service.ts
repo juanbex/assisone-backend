@@ -3,7 +3,7 @@ import { whatsappPushQueue, coordinationTimerQueue, arrivalCheckQueue } from '..
 import { sendText } from '../notifications/whatsapp.service'
 
 const TIMER_DELAY_MS = 10 * 60 * 1000
-const ETA_BUFFER_PCT = 0.20 // 20% de buffer sobre el tiempo prometido
+const ETA_BUFFER_PCT = 0.20
 
 function normalize(str: string): string {
   return str.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '-').trim()
@@ -128,19 +128,23 @@ export async function saveProviderEta(from: string, providerMinutes: number) {
     where: { provider: { whatsapp: { in: buildPhoneVariants(from) } }, status: 'accepted' },
     include: { service: { include: { client: true, serviceType: true } }, provider: true },
   })
-  if (!assignment) return null
 
-  // Calcular tiempo con buffer del 20%
+  if (!assignment) {
+    console.log(`[eta] No se encontró assignment aceptado para ${from}`)
+    return null
+  }
+
+  // Tiempo que se le comunica al cliente = con buffer del 20%
   const clientMinutes = Math.ceil(providerMinutes * (1 + ETA_BUFFER_PCT))
   const etaSetAt = new Date()
 
-  // CRM guarda el tiempo del proveedor (real)
-  // respondedAt se resetea al momento del ETA para el countdown
+  console.log(`[eta] Guardando: proveedor=${providerMinutes}min, cliente=${clientMinutes}min, assignment=${assignment.id}`)
+
   await db.serviceAssignment.update({
     where: { id: assignment.id },
     data: {
-      etaMinutes: providerMinutes,  // tiempo real del proveedor
-      respondedAt: etaSetAt,        // inicio del countdown desde ahora
+      etaMinutes:  providerMinutes, // lo que prometió el proveedor (interno CRM)
+      respondedAt: etaSetAt,        // resetear countdown desde ahora
     },
   })
 
@@ -156,7 +160,7 @@ export async function saveProviderEta(from: string, providerMinutes: number) {
     },
   })
 
-  // Al cliente le comunicamos el tiempo CON BUFFER (clientMinutes)
+  // Notificar al cliente con el tiempo CON buffer
   const client = assignment.service?.client
   const serviceType = assignment.service?.serviceType?.name ?? 'servicio'
   const providerName = assignment.provider?.name ?? 'El proveedor'
@@ -174,9 +178,13 @@ export async function saveProviderEta(from: string, providerMinutes: number) {
       console.error(`[eta] Error notificando cliente:`, err.message)
     }
 
-    // Timer de verificación = cuando venza el tiempo CON BUFFER (clientMinutes)
-    // Al 80% del tiempo = cuando queda 20% → momento de preguntar al cliente
+    // Timer de verificación al 80% del tiempo del cliente
     const alertDelayMs = clientMinutes * 60 * 1000 * 0.80
+    try {
+      // Remover timer anterior si existe
+      const existingJob = await arrivalCheckQueue.getJob(`arrival-${assignment.serviceId}`)
+      if (existingJob) await existingJob.remove()
+    } catch {}
 
     await arrivalCheckQueue.add(
       `arrival-${assignment.serviceId}`,
@@ -192,7 +200,7 @@ export async function saveProviderEta(from: string, providerMinutes: number) {
       { delay: alertDelayMs, jobId: `arrival-${assignment.serviceId}` }
     )
 
-    console.log(`[eta] Proveedor: ${providerMinutes}min → Cliente: ${clientMinutes}min → Alerta en: ${Math.round(alertDelayMs/60000)}min`)
+    console.log(`[eta] Timer de verificación en ${Math.round(alertDelayMs / 60000)}min para ${assignment.serviceId}`)
   }
 
   return { assignment, providerMinutes, clientMinutes }
@@ -210,16 +218,14 @@ export async function handleClientArrivalConfirmation(clientPhone: string, confi
   if (!service) return null
 
   if (confirmed) {
-    // Cliente confirma llegada → En prestación (AUTOMÁTICO)
     await db.service.update({ where: { id: service.id }, data: { status: 'in_service' } })
     await db.serviceEvent.create({
       data: {
         serviceId: service.id, eventType: 'client_confirmed_arrival',
-        payload: { clientPhone, confirmed: true, auto: true },
+        payload: { clientPhone, confirmed: true },
       },
     })
   } else {
-    // Cliente dice que NO llegó → alerta para agente back
     await db.serviceEvent.create({
       data: {
         serviceId: service.id, eventType: 'client_denied_arrival',
@@ -232,10 +238,11 @@ export async function handleClientArrivalConfirmation(clientPhone: string, confi
 }
 
 export async function getServicesForTracking(tenantId: string) {
+  // Incluir TODOS los estados activos — coordinado + en prestación (+ legacy)
   const services = await db.service.findMany({
     where: {
       tenantId,
-      status: { in: ['coordinated', 'in_service'] },
+      status: { in: ['coordinated', 'assigned', 'in_progress', 'in_service'] },
     },
     orderBy: { createdAt: 'desc' },
     include: {
