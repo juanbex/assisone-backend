@@ -54,8 +54,7 @@ export async function startCoordination(serviceId: string) {
     await db.service.update({ where: { id: serviceId }, data: { status: 'uncoordinated' } })
     await db.serviceEvent.create({
       data: {
-        serviceId,
-        eventType: 'coordination_failed',
+        serviceId, eventType: 'coordination_failed',
         payload: { reason: `Sin proveedores para tipo "${service.serviceType.name}" en "${locationStr || 'cualquier zona'}"` },
       },
     })
@@ -68,12 +67,10 @@ export async function startCoordination(serviceId: string) {
         data: { serviceId, providerId: provider.id, status: 'pending' },
       })
       await whatsappPushQueue.add(`push-${assignment.id}`, {
-        assignmentId: assignment.id,
-        to:           provider.whatsapp,
-        providerName: provider.name,
-        serviceType:  service.serviceType.name,
-        location:     locationStr || 'Sin dirección especificada',
-        timestamp:    new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' }),
+        assignmentId: assignment.id, to: provider.whatsapp,
+        providerName: provider.name, serviceType: service.serviceType.name,
+        location: locationStr || 'Sin dirección especificada',
+        timestamp: new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' }),
       })
       return assignment
     })
@@ -82,8 +79,7 @@ export async function startCoordination(serviceId: string) {
   await db.service.update({ where: { id: serviceId }, data: { status: 'in_coordination' } })
   await db.serviceEvent.create({
     data: {
-      serviceId,
-      eventType: 'coordination_started',
+      serviceId, eventType: 'coordination_started',
       payload: { providersContacted: eligible.length, assignmentIds: assignments.map(a => a.id) },
     },
   })
@@ -111,8 +107,7 @@ export async function acceptAssignment(assignmentId: string, from: string) {
 
   await db.serviceEvent.create({
     data: {
-      serviceId: assignment.serviceId,
-      eventType: 'provider_accepted',
+      serviceId: assignment.serviceId, eventType: 'provider_accepted',
       payload: { assignmentId, providerWhatsapp: from },
     },
   })
@@ -137,20 +132,25 @@ export async function saveProviderEta(from: string, minutes: number) {
   })
   if (!assignment) return null
 
+  // ⚠️ IMPORTANTE: actualizamos respondedAt = AHORA para que el countdown
+  // empiece desde el momento en que el proveedor da el ETA, no desde cuando aceptó
+  const etaSetAt = new Date()
   await db.serviceAssignment.update({
     where: { id: assignment.id },
-    data: { etaMinutes: minutes },
+    data: {
+      etaMinutes: minutes,
+      respondedAt: etaSetAt, // reset del timestamp para el countdown
+    },
   })
 
   await db.serviceEvent.create({
     data: {
-      serviceId: assignment.serviceId,
-      eventType: 'eta_set',
-      payload: { etaMinutes: minutes, providerWhatsapp: from },
+      serviceId: assignment.serviceId, eventType: 'eta_set',
+      payload: { etaMinutes: minutes, providerWhatsapp: from, etaSetAt: etaSetAt.toISOString() },
     },
   })
 
-  // Notificar al cliente que el proveedor va en camino con ETA
+  // Notificar al cliente
   const client = assignment.service?.client
   const serviceType = assignment.service?.serviceType?.name ?? 'servicio'
   const providerName = assignment.provider?.name ?? 'El proveedor'
@@ -172,27 +172,21 @@ export async function saveProviderEta(from: string, minutes: number) {
     await arrivalCheckQueue.add(
       `arrival-${assignment.serviceId}`,
       {
-        serviceId:   assignment.serviceId,
-        clientPhone: client.phone,
-        clientName:  client.name,
+        serviceId:    assignment.serviceId,
+        clientPhone:  client.phone,
+        clientName:   client.name,
         serviceType,
         providerName,
         assignmentId: assignment.id,
       },
-      {
-        delay:  minutes * 60 * 1000,
-        jobId: `arrival-${assignment.serviceId}`,
-      }
+      { delay: minutes * 60 * 1000, jobId: `arrival-${assignment.serviceId}` }
     )
-    console.log(`[eta] Verificación de llegada programada en ${minutes} min para servicio ${assignment.serviceId}`)
   }
 
   return assignment
 }
 
-// Confirmación de llegada del cliente
 export async function handleClientArrivalConfirmation(clientPhone: string, confirmed: boolean) {
-  // Buscar servicio activo del cliente (en assigned o in_progress)
   const service = await db.service.findFirst({
     where: {
       client: { phone: { in: buildPhoneVariants(clientPhone) } },
@@ -201,25 +195,20 @@ export async function handleClientArrivalConfirmation(clientPhone: string, confi
     include: { client: true, serviceType: true },
     orderBy: { createdAt: 'desc' },
   })
-
   if (!service) return null
 
   if (confirmed) {
-    // Cliente confirma que el técnico llegó → En prestación
     await db.service.update({ where: { id: service.id }, data: { status: 'in_service' } })
     await db.serviceEvent.create({
       data: {
-        serviceId: service.id,
-        eventType: 'client_confirmed_arrival',
+        serviceId: service.id, eventType: 'client_confirmed_arrival',
         payload: { clientPhone, confirmed: true },
       },
     })
   } else {
-    // Cliente dice que NO llegó → registrar evento + alerta para agente back
     await db.serviceEvent.create({
       data: {
-        serviceId: service.id,
-        eventType: 'client_denied_arrival',
+        serviceId: service.id, eventType: 'client_denied_arrival',
         payload: { clientPhone, confirmed: false, alert: 'El cliente reporta que el proveedor NO ha llegado' },
       },
     })
